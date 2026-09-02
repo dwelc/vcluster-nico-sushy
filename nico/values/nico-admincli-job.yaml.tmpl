@@ -1,0 +1,38 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JOB_NAME}
+  namespace: ${NICO_SYSTEM_NS}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: ${JOB_DEADLINE}
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      ${JOB_PULL_SECRET}
+      hostAliases:
+        - ip: "${API_ADDRESS}"
+          hostnames: ["${API_HOSTNAME}"]
+      volumes:
+        - name: cert
+          secret:
+            secretName: ${CERT_SECRET}
+      containers:
+        - name: admincli
+          image: ${ADMIN_CLI_IMAGE}
+          command: ["${ADMIN_CLI_PATH}"]
+          args: ${JOB_ARGS}
+          env:
+            - name: API_URL
+              value: "https://${API_HOSTNAME}:${API_PORT_INCLUSTER}"
+            - name: ROOT_CA_PATH
+              value: /certs/ca.crt
+            - name: CLIENT_CERT_PATH
+              value: /certs/client.crt
+            - name: CLIENT_KEY_PATH
+              value: /certs/client.key
+          volumeMounts:
+            - name: cert
+              mountPath: /certs
+              readOnly: true

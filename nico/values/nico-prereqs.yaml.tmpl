@@ -1,0 +1,11 @@
+siteName: "${SITE_NAME}"
+
+postgresql:
+  # 2 is the minimum that satisfies the chart's synchronous_mode_strict.
+  instances: ${POSTGRES_INSTANCES}
+  volumeSize: "10Gi"
+  storageClass: "${NICO_STORAGE_CLASS}"
+
+# Flow prerequisites are only rendered when Flow itself is installed.
+flow:
+  enabled: $([[ "${SKIP_FLOW}" == "true" ]] && echo false || echo true)

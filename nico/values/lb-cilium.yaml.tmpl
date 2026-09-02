@@ -1,0 +1,21 @@
+# LB_MODE=cilium: Cilium LB-IPAM + L2. VIPs are pinned per Service with lbipam.cilium.io/ips
+# from your existing pool. NiCo's PXE/API keep externalTrafficPolicy=Local (they identify hosts by
+# source IP), and Cilium's L2 lease holder is not endpoint-aware, so nico-system Services are
+# announced only from NICO_EDGE_NODE, where the installer pins nico-api/pxe/dhcp. Your default
+# CiliumL2AnnouncementPolicy must exclude the namespace (see nico/README.md).
+apiVersion: cilium.io/v2alpha1
+kind: CiliumL2AnnouncementPolicy
+metadata:
+  name: nico-l2-policy
+spec:
+  interfaces:
+    - ${L2_INTERFACE}
+  loadBalancerIPs: true
+  serviceSelector:
+    matchExpressions:
+      - key: io.kubernetes.service.namespace
+        operator: In
+        values: [${NICO_SYSTEM_NS}]
+  nodeSelector:
+    matchLabels:
+      kubernetes.io/hostname: ${NICO_EDGE_NODE}

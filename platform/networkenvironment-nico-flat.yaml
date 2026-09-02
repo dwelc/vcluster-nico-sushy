@@ -1,0 +1,16 @@
+# Cluster-scoped; bound to the Tenant by label, NOT by a project namespace. The provider creates a
+# FLAT VPC in NiCo for it and writes nico.vcluster.com/vpc-id back as an annotation (see
+# argocd-ignoredifferences.yaml if this is GitOps-managed with selfHeal).
+apiVersion: management.loft.sh/v1
+kind: NetworkEnvironment
+metadata:
+  name: nico-flat
+  labels:
+    tenant.vcluster.com/owner: nico-demo
+  annotations:
+    machines.vcluster.com/is-default-environment: "true"
+spec:
+  providerRef: nico
+  owner:
+    user: admin
+  properties: {}

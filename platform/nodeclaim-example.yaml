@@ -1,0 +1,17 @@
+# A Platform Machine provisioned by NiCo (runtime object; apply by hand). NiCo picks a machine
+# from the instance type's pool; add spec.machineRef to pin one.
+apiVersion: management.loft.sh/v1
+kind: NodeClaim
+metadata:
+  name: nico-worker
+  namespace: p-default
+  labels:
+    tenant.platform.vcluster.com/name: nico-demo
+spec:
+  providerRef: nico
+  typeRef: nico.flat-demo-type
+  environmentRef: nico-flat
+  owner:
+    user: admin
+  properties:
+    vcluster.com/os-image: ubuntu-noble-nico

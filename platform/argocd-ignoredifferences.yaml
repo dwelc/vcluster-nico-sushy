@@ -1,0 +1,9 @@
+# If the objects above are managed by an Argo CD Application with selfHeal, ignore the fields the
+# NiCo provider writes back, or every sync strips them and the environment re-provisions.
+ignoreDifferences:
+  - group: management.loft.sh
+    kind: NetworkEnvironment
+    jsonPointers:
+      - /metadata/annotations/nico.vcluster.com~1vpc-id
+      - /metadata/annotations/nico.vcluster.com~1vpc-prefix-id
+      - /metadata/annotations/nico.vcluster.com~1adoptions

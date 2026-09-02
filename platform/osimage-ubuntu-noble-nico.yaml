@@ -1,0 +1,16 @@
+# Materialised by the provider as a NiCo OperatingSystem for the tenant: scout writes the qcow2 to
+# os-image-disk and finds the root fs by label. Serve the image over plain HTTP reachable from the
+# VM segment (the same server you use for Metal3 works).
+apiVersion: management.loft.sh/v1
+kind: OSImage
+metadata:
+  name: ubuntu-noble-nico
+spec:
+  displayName: Ubuntu 24.04 LTS (NiCo)
+  owner:
+    user: admin
+  properties:
+    nico.vcluster.com/os-image-url: http://CHANGE-ME-image-server/ubuntu-24.04-server-cloudimg-amd64.img
+    nico.vcluster.com/os-image-sha: CHANGE-ME-sha256-of-the-file
+    nico.vcluster.com/os-image-disk: /dev/sda
+    nico.vcluster.com/os-image-rootfs-label: cloudimg-rootfs

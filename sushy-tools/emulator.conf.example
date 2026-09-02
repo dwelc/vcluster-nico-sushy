@@ -1,0 +1,23 @@
+# One sushy-tools NiCo-fork instance per VM (deploy.sh renders one of these per line of vms.conf).
+# NiCo needs exactly ONE ComputerSystem per BMC endpoint, TLS, and a fixed BMC address.
+SUSHY_EMULATOR_LISTEN_IP = '198.51.100.202'          # alias on the host's management LAN, unique per VM
+SUSHY_EMULATOR_LISTEN_PORT = 443
+SUSHY_EMULATOR_SSL_CERT = '/etc/sushy-nico/tls.crt'   # self-signed is fine (NiCo: allow_insecure_discovery)
+SUSHY_EMULATOR_SSL_KEY = '/etc/sushy-nico/tls.key'
+SUSHY_EMULATOR_LIBVIRT_URI = 'qemu:///system'
+SUSHY_EMULATOR_AUTH_FILE = '/etc/sushy-nico/htpasswd' # basic auth; libredfish never uses sessions
+SUSHY_EMULATOR_STATE_DIR = '/var/lib/sushy-nico/nico-vm-1'
+SUSHY_EMULATOR_ALLOWED_INSTANCES = {'00000000-0000-0000-0000-000000000001'}   # the libvirt domain UUID
+
+# --- added by the NiCo surface patch ---------------------------------------------
+SUSHY_EMULATOR_NICO_VENDOR = 'AMI'        # service-root Vendor; AMI is the lightest hardware type in NiCo
+SUSHY_EMULATOR_NICO_MODEL = 'kvm-guest'
+# Serial fallback if the domain has no <sysinfo type="smbios"> serial (redefine-vms.sh sets one).
+SUSHY_EMULATOR_SYSTEM_SERIALS = {'nico-vm-1': 'NICO-VM-1'}
+# Synthetic BMC MAC reported on Managers/<id>/EthernetInterfaces/1 (must match the ExpectedMachine).
+SUSHY_EMULATOR_BMC_MACS = {'00000000-0000-0000-0000-000000000001': '02:00:00:00:0b:01'}
+# UefiHttp + HttpBootUri is treated as plain network boot (NiCo hands the URI out via DHCP).
+SUSHY_EMULATOR_NICO_IGNORE_HTTP_BOOT_URI = True
+# Optional overrides (defaults shown in sushy_tools/emulator/nico.py):
+# SUSHY_EMULATOR_NICO_BIOS_DEFAULTS = {...}  # AMI BIOS attributes NiCo expects, rendered when unset
+# SUSHY_EMULATOR_NICO_INT_ATTRS = ['LEM0001', 'LEM0003']

@@ -1,0 +1,666 @@
+diff --git a/sushy_tools/emulator/main.py b/sushy_tools/emulator/main.py
+index b1ae4c1..5012100 100755
+--- a/sushy_tools/emulator/main.py
++++ b/sushy_tools/emulator/main.py
+@@ -30,6 +30,7 @@ from sushy_tools.emulator.controllers import certificate_service as certctl
+ from sushy_tools.emulator.controllers import update_service as usctl
+ from sushy_tools.emulator.controllers import virtual_media as vmctl
+ from sushy_tools.emulator import memoize
++from sushy_tools.emulator import nico
+ from sushy_tools.emulator.resources import chassis as chsdriver
+ from sushy_tools.emulator.resources import drives as drvdriver
+ from sushy_tools.emulator.resources import indicators as inddriver
+@@ -251,8 +252,10 @@ def chassis_resource(identity):
+ 
+         # the first chassis gets all resources
+         if uuid == chassis.chassis[0]:
+-            systems = app.systems.systems
+-            managers = app.managers.managers
++            systems = [s for s in app.systems.systems
++                       if not api_utils.instance_denied(identity=s)]
++            managers = [m for m in app.managers.managers
++                        if not api_utils.instance_denied(identity=m)]
+             storage = app.storage.get_all_storage()
+             drives = app.drives.get_all_drives()
+ 
+@@ -274,7 +277,11 @@ def chassis_resource(identity):
+             managers=managers[:1],
+             indicator_led=app.indicators.get_indicator_state(uuid),
+             storage=storage,
+-            drives=drives
++            drives=drives,
++            nico_vendor=app.config['SUSHY_EMULATOR_NICO_VENDOR'],
++            nico_model=app.config['SUSHY_EMULATOR_NICO_MODEL'],
++            nico_serial=(nico.serial_number(app, systems[0])
++                         if len(systems) == 1 else None)
+         )
+ 
+     elif flask.request.method == 'PATCH':
+@@ -325,10 +332,12 @@ def manager_collection_resource():
+ 
+     app.logger.debug('Serving managers list')
+ 
++    managers = [m for m in app.managers.managers
++                if not api_utils.instance_denied(identity=m)]
+     return app.render_template(
+         'manager_collection.json',
+-        manager_count=len(app.managers.managers),
+-        managers=app.managers.managers)
++        manager_count=len(managers),
++        managers=managers)
+ 
+ 
+ def jsonify(obj_type, obj_version, obj):
+@@ -366,6 +375,21 @@ def manager_resource(identity):
+             "VirtualMedia": {
+                 "@odata.id": "/redfish/v1/Systems/%s/VirtualMedia" % systems[0]
+                 },
++            "EthernetInterfaces": {
++                "@odata.id": "/redfish/v1/Managers/%s/EthernetInterfaces" % uuid
++                },
++            "HostInterfaces": {
++                "@odata.id": "/redfish/v1/Managers/%s/HostInterfaces" % uuid
++                },
++            "NetworkProtocol": {
++                "@odata.id": "/redfish/v1/Managers/%s/NetworkProtocol" % uuid
++                },
++            "Actions": {
++                "#Manager.Reset": {
++                    "target": "/redfish/v1/Managers/%s/Actions/Manager.Reset" % uuid,
++                    "ResetType@Redfish.AllowableValues": ["GracefulRestart", "ForceRestart"]
++                    }
++                },
+             "Links": {
+                 "ManagerForServers": [
+                     {
+@@ -481,7 +505,8 @@ def system_resource(identity):
+             chassis=app.chassis.chassis[:1],
+             indicator_led=app.indicators.get_indicator_state(
+                 app.systems.uuid(identity)),
+-            http_boot_uri=try_get(app.systems.get_http_boot_uri)
++            http_boot_uri=try_get(app.systems.get_http_boot_uri),
++            **nico.system_context(app, identity)
+         )
+ 
+     elif flask.request.method == 'PATCH':
+@@ -497,6 +522,19 @@ def system_resource(identity):
+             target = boot.get('BootSourceOverrideTarget')
+             mode = boot.get('BootSourceOverrideMode')
+             http_uri = boot.get('HttpBootUri')
++            boot_order = boot.get('BootOrder')
++
++            if boot_order is not None:
++                nico.set_boot_order(app, identity, boot_order)
++                if not target and not mode and not http_uri:
++                    return '', 204
++
++            if (http_uri and target == 'UefiHttp'
++                    and app.config['SUSHY_EMULATOR_NICO_IGNORE_HTTP_BOOT_URI']):
++                app.logger.info('Ignoring HttpBootUri %s for system "%s": '
++                                'NiCo mode, DHCP carries the boot URI',
++                                http_uri, identity)
++                http_uri = None
+ 
+             if http_uri and target == 'UefiHttp':
+ 
+@@ -664,7 +702,7 @@ def bios(identity):
+     if app.feature_set != "full":
+         raise error.FeatureNotAvailable("BIOS")
+ 
+-    bios = app.systems.get_bios(identity)
++    bios = nico.bios_attributes(app, identity)
+ 
+     app.logger.debug('Serving BIOS for system "%s"', identity)
+ 
+@@ -683,7 +721,7 @@ def bios_settings(identity):
+         raise error.FeatureNotAvailable("BIOS")
+ 
+     if flask.request.method == 'GET':
+-        bios = app.systems.get_bios(identity)
++        bios = nico.bios_attributes(app, identity)
+ 
+         app.logger.debug('Serving BIOS Settings for system "%s"', identity)
+ 
+@@ -1061,6 +1099,10 @@ def parse_args():
+     return parser.parse_args()
+ 
+ 
++# NiCo extras go last: they alias view functions defined above.
++nico.register(app)
++
++
+ def main():
+ 
+     args = parse_args()
+diff --git a/sushy_tools/emulator/nico.py b/sushy_tools/emulator/nico.py
+new file mode 100644
+index 0000000..96cd5eb
+--- /dev/null
++++ b/sushy_tools/emulator/nico.py
+@@ -0,0 +1,381 @@
++# Licensed under the Apache License, Version 2.0 (the "License"); you may
++# not use this file except in compliance with the License. You may obtain
++# a copy of the License at
++#
++#      http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++# License for the specific language governing permissions and limitations
++# under the License.
++
++"""Redfish surface NVIDIA Infra Controller (NiCo) needs on top of sushy.
++
++NiCo's site-explorer treats the emulator as an AMI-class BMC. That path needs:
++service-root Vendor + Links, a System SerialNumber, BootOptions + BootOrder,
++Manager EthernetInterfaces/HostInterfaces/NetworkProtocol, an (empty)
++UpdateService/FirmwareInventory, and the `Bios`, `Bios/SD`, `Systems/<id>/SD`
++spellings libredfish uses. Everything here is additive.
++"""
++
++import flask
++
++from sushy_tools.emulator import api_utils
++from sushy_tools.emulator import memoize
++from sushy_tools import error
++
++CONFIG_DEFAULTS = {
++    # Service-root Vendor. "AMI" is the lightest hardware type in NiCo.
++    'SUSHY_EMULATOR_NICO_VENDOR': 'AMI',
++    'SUSHY_EMULATOR_NICO_PRODUCT': 'Sushy Emulator',
++    'SUSHY_EMULATOR_NICO_MODEL': 'sushy-kvm',
++    # {system name or uuid: serial}; libvirt SMBIOS serial wins when present.
++    'SUSHY_EMULATOR_SYSTEM_SERIALS': {},
++    # {system uuid: mac}; default is derived from the uuid.
++    'SUSHY_EMULATOR_BMC_MACS': {},
++    # Treat UefiHttp+HttpBootUri as plain network boot; NiCo serves the URI
++    # over DHCP, so sushy must not download it as a CD image.
++    'SUSHY_EMULATOR_NICO_IGNORE_HTTP_BOOT_URI': True,
++    # BIOS attributes NiCo's AMI path reads before it writes them. Rendered
++    # (not stored) when missing, so a fresh VM already looks set up.
++    'SUSHY_EMULATOR_NICO_BIOS_DEFAULTS': {
++        'VMXEN': 'Enable', 'PCIS007': 'Enabled', 'LEM0001': 3,
++        'NWSK000': 'Enabled', 'NWSK001': 'Disabled', 'NWSK006': 'Enabled',
++        'NWSK002': 'Disabled', 'NWSK007': 'Disabled', 'FBO001': 'UEFI',
++        'EndlessBoot': 'Enabled', 'TCG006': 'None',
++        'KCSACP': 'Deny All', 'USB000': 'Disabled',
++        'TER001': 'Enabled', 'TER010': 'Enabled', 'TER06B': 'COM1',
++        'TER0021': '115200', 'TER0020': '115200', 'TER012': 'VT100Plus',
++        'TER011': 'VT-UTF8', 'TER05D': 'None',
++    },
++    # Attributes NiCo compares as JSON integers; libvirt metadata stores text.
++    'SUSHY_EMULATOR_NICO_INT_ATTRS': ['LEM0001', 'LEM0003'],
++}
++
++BOOT_ORDER_HTTP = 'http'
++BOOT_ORDER_PXE = 'pxe'
++BOOT_ORDER_HDD = 'hdd'
++
++_boot_orders = memoize.PersistentDict()
++# NiCo lockdown state (per BMC process; the emulator has no real interfaces).
++_host_iface_enabled = {}
++_ipmi_enabled = {}
++
++
++def init(app):
++    for key, value in CONFIG_DEFAULTS.items():
++        app.config.setdefault(key, value)
++
++
++_store_ready = False
++
++
++def _store(app):
++    # Lazy: the config file (and so STATE_DIR) is loaded after import.
++    global _store_ready
++    if not _store_ready:
++        if hasattr(_boot_orders, 'make_permanent'):
++            _boot_orders.make_permanent(
++                app.config.get('SUSHY_EMULATOR_STATE_DIR'), 'nico-bootorder')
++        _store_ready = True
++    return _boot_orders
++
++
++def _mac12(mac):
++    return mac.replace(':', '').replace('-', '').upper()
++
++
++def _mac_colon(mac):
++    m = _mac12(mac)
++    return ':'.join(m[i:i + 2] for i in range(0, 12, 2))
++
++
++def nic_uefi_path(nic):
++    return 'PciRoot(0x0)/Pci(0x1,0x0)/MAC(%s,0x1)' % _mac12(nic['mac'])
++
++
++def serial_number(app, identity):
++    try:
++        serial = app.systems.get_serial_number(identity)
++    except (AttributeError, error.NotSupportedError):
++        serial = None
++    if serial:
++        return serial
++    serials = app.config['SUSHY_EMULATOR_SYSTEM_SERIALS'] or {}
++    return (serials.get(app.systems.name(identity))
++            or serials.get(app.systems.uuid(identity)))
++
++
++def bmc_mac(app, uuid):
++    macs = app.config['SUSHY_EMULATOR_BMC_MACS'] or {}
++    if uuid in macs:
++        return _mac_colon(macs[uuid])
++    tail = uuid.replace('-', '')[-6:].upper()
++    return _mac_colon('020000' + tail)
++
++
++def boot_options(app, identity):
++    """Static UEFI boot options: HTTP IPv4 and PXE IPv4 per NIC, then disk."""
++    options = []
++    n = 1
++    for nic in app.systems.get_nics(identity):
++        mac12 = _mac12(nic['mac'])
++        base = nic_uefi_path(nic)
++        ipv4 = base + '/IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)'
++        options.append({
++            'ref': 'Boot%04d' % n, 'kind': BOOT_ORDER_HTTP, 'alias': 'UefiHttp',
++            # libredfish matches HTTP + IPV4 + the MAC (either spelling).
++            'name': 'UEFI HTTP IPv4 (MAC:%s / %s)' % (mac12, _mac_colon(mac12)),
++            'path': ipv4 + '/Uri()'})
++        options.append({
++            'ref': 'Boot%04d' % (n + 1), 'kind': BOOT_ORDER_PXE, 'alias': 'Pxe',
++            'name': 'UEFI PXE IPv4 (MAC:%s / %s)' % (mac12, _mac_colon(mac12)),
++            'path': ipv4})
++        n += 2
++    options.append({
++        'ref': 'Boot%04d' % n, 'kind': BOOT_ORDER_HDD, 'alias': 'Hdd',
++        'name': 'UEFI Hard Disk',
++        'path': 'HD(1,GPT,00000000-0000-0000-0000-000000000001,0x800,0x100000)'})
++    return options
++
++
++def boot_order(app, identity):
++    uuid = app.systems.uuid(identity)
++    stored = _store(app).get(uuid)
++    options = boot_options(app, identity)
++    refs = [o['ref'] for o in options]
++    if stored:
++        order = [r for r in stored if r in refs]
++        order += [r for r in refs if r not in order]
++        return order
++    device = app.systems.get_boot_device(identity)
++    network_first = device in ('Pxe', 'UefiHttp')
++    net = [o['ref'] for o in options if o['kind'] != BOOT_ORDER_HDD]
++    disk = [o['ref'] for o in options if o['kind'] == BOOT_ORDER_HDD]
++    return net + disk if network_first else disk + net
++
++
++def set_boot_order(app, identity, order):
++    """Store the order and map its first entry onto the libvirt boot device."""
++    if not isinstance(order, list) or not order:
++        raise error.BadRequest('Boot.BootOrder must be a non-empty list')
++    refs = [str(e).split(': ', 1)[0] for e in order]
++    options = {o['ref']: o for o in boot_options(app, identity)}
++    unknown = [r for r in refs if r not in options]
++    if unknown:
++        raise error.BadRequest('Unknown boot option reference(s): %s' % unknown)
++    uuid = app.systems.uuid(identity)
++    _store(app)[uuid] = refs
++    first = options[refs[0]]['kind']
++    app.systems.set_boot_device(
++        identity, 'Hdd' if first == BOOT_ORDER_HDD else 'Pxe')
++    app.logger.info('System "%s" boot order set to %s (libvirt boot: %s)',
++                    identity, refs, first)
++
++
++def system_context(app, identity):
++    """Template variables for system.json."""
++    uuid = app.systems.uuid(identity)
++    return {
++        'nico_vendor': app.config['SUSHY_EMULATOR_NICO_VENDOR'],
++        'nico_model': app.config['SUSHY_EMULATOR_NICO_MODEL'],
++        'nico_serial': serial_number(app, identity),
++        'nico_boot_order': boot_order(app, uuid),
++    }
++
++
++def bios_attributes(app, identity):
++    """Stored BIOS attributes with NiCo defaults filled in and ints typed."""
++    attrs = dict(app.config['SUSHY_EMULATOR_NICO_BIOS_DEFAULTS'] or {})
++    attrs.update(app.systems.get_bios(identity))
++    for key in app.config['SUSHY_EMULATOR_NICO_INT_ATTRS'] or []:
++        value = attrs.get(key)
++        if isinstance(value, str) and value.lstrip('-').isdigit():
++            attrs[key] = int(value)
++    return attrs
++
++
++def _collection(odata_id, odata_type, name, members):
++    return {
++        '@odata.id': odata_id,
++        '@odata.type': odata_type,
++        'Name': name,
++        'Members': [{'@odata.id': m} for m in members],
++        'Members@odata.count': len(members),
++    }
++
++
++def register(app):
++    """Add the NiCo routes and the alternate spellings libredfish uses."""
++    init(app)
++
++    # libredfish builds `Systems/<id>/Bios` and `Bios/SD`; sushy serves `BIOS`.
++    app.add_url_rule('/redfish/v1/Systems/<identity>/Bios',
++                     endpoint='nico_bios', view_func=app.view_functions['bios'])
++    app.add_url_rule('/redfish/v1/Systems/<identity>/Bios/Settings',
++                     endpoint='nico_bios_settings',
++                     view_func=app.view_functions['bios_settings'],
++                     methods=['GET', 'PATCH'])
++    app.add_url_rule('/redfish/v1/Systems/<identity>/Bios/SD',
++                     endpoint='nico_bios_sd',
++                     view_func=app.view_functions['bios_settings'],
++                     methods=['GET', 'PATCH'])
++    app.add_url_rule('/redfish/v1/Systems/<identity>/BIOS/SD',
++                     endpoint='nico_bios_sd_upper',
++                     view_func=app.view_functions['bios_settings'],
++                     methods=['GET', 'PATCH'])
++    # AMI writes the boot order to the settings-data shadow of the system.
++    app.add_url_rule('/redfish/v1/Systems/<identity>/SD',
++                     endpoint='nico_system_sd',
++                     view_func=app.view_functions['system_resource'],
++                     methods=['GET', 'PATCH'])
++
++    def _boot_option_doc(identity, o):
++        return {
++            '@odata.id': '/redfish/v1/Systems/%s/BootOptions/%s'
++                         % (identity, o['ref']),
++            '@odata.type': '#BootOption.v1_0_4.BootOption',
++            'Id': o['ref'], 'Name': o['ref'],
++            'BootOptionReference': o['ref'],
++            'DisplayName': o['name'],
++            'Alias': o['alias'],
++            'BootOptionEnabled': True,
++            'UefiDevicePath': o['path'],
++        }
++
++    @app.route('/redfish/v1/Systems/<identity>/BootOptions')
++    @api_utils.ensure_instance_access
++    @api_utils.returns_json
++    def nico_boot_options(identity):
++        # Members are expanded: libredfish parses them straight into BootOption.
++        base = '/redfish/v1/Systems/%s/BootOptions' % identity
++        members = [_boot_option_doc(identity, o)
++                   for o in boot_options(app, identity)]
++        return flask.jsonify({
++            '@odata.id': base,
++            '@odata.type': '#BootOptionCollection.BootOptionCollection',
++            '@odata.context':
++                '/redfish/v1/$metadata#BootOptionCollection.BootOptionCollection',
++            'Name': 'Boot Options Collection',
++            'Members': members,
++            'Members@odata.count': len(members),
++        })
++
++    @app.route('/redfish/v1/Systems/<identity>/BootOptions/<ref>')
++    @api_utils.ensure_instance_access
++    @api_utils.returns_json
++    def nico_boot_option(identity, ref):
++        for o in boot_options(app, identity):
++            if o['ref'] == ref:
++                return flask.jsonify(_boot_option_doc(identity, o))
++        raise error.NotFound()
++
++    @app.route('/redfish/v1/Managers/<identity>/EthernetInterfaces')
++    @api_utils.ensure_instance_access
++    @api_utils.returns_json
++    def nico_manager_eth_collection(identity):
++        base = '/redfish/v1/Managers/%s/EthernetInterfaces' % identity
++        return flask.jsonify(_collection(
++            base, '#EthernetInterfaceCollection.EthernetInterfaceCollection',
++            'Manager Ethernet Interface Collection', [base + '/1']))
++
++    @app.route('/redfish/v1/Managers/<identity>/EthernetInterfaces/<nic_id>')
++    @api_utils.ensure_instance_access
++    @api_utils.returns_json
++    def nico_manager_eth(identity, nic_id):
++        if nic_id != '1':
++            raise error.NotFound()
++        mac = bmc_mac(app, app.systems.uuid(identity))
++        host = flask.request.host.split(':')[0]
++        return flask.jsonify({
++            '@odata.id': '/redfish/v1/Managers/%s/EthernetInterfaces/1'
++                         % identity,
++            '@odata.type': '#EthernetInterface.v1_6_0.EthernetInterface',
++            'Id': '1', 'Name': 'BMC Network Interface',
++            'MACAddress': mac, 'PermanentMACAddress': mac,
++            'InterfaceEnabled': True, 'LinkStatus': 'LinkUp',
++            'Status': {'State': 'Enabled', 'Health': 'OK'},
++            'IPv4Addresses': [{'Address': host, 'AddressOrigin': 'Static'}],
++        })
++
++    @app.route('/redfish/v1/Managers/<identity>/HostInterfaces')
++    @api_utils.ensure_instance_access
++    @api_utils.returns_json
++    def nico_host_interfaces(identity):
++        base = '/redfish/v1/Managers/%s/HostInterfaces' % identity
++        return flask.jsonify(_collection(
++            base, '#HostInterfaceCollection.HostInterfaceCollection',
++            'Host Interface Collection', [base + '/Self']))
++
++    @app.route('/redfish/v1/Managers/<identity>/HostInterfaces/<hi_id>',
++               methods=['GET', 'PATCH'])
++    @api_utils.ensure_instance_access
++    @api_utils.returns_json
++    def nico_host_interface(identity, hi_id):
++        if hi_id not in ('Self', '1'):
++            raise error.NotFound()
++        if flask.request.method == 'PATCH':
++            # NiCo lockdown toggles the host interface; remember it.
++            body = flask.request.get_json(silent=True) or {}
++            if 'InterfaceEnabled' in body:
++                _host_iface_enabled[identity] = bool(body['InterfaceEnabled'])
++                app.logger.info('HostInterface for "%s" InterfaceEnabled=%s',
++                                identity, body['InterfaceEnabled'])
++            return '', 204
++        enabled = _host_iface_enabled.get(identity, False)
++        return flask.jsonify({
++            '@odata.id': '/redfish/v1/Managers/%s/HostInterfaces/Self' % identity,
++            '@odata.type': '#HostInterface.v1_3_0.HostInterface',
++            'Id': 'Self', 'Name': 'Host Interface',
++            'HostInterfaceType': 'NetworkHostInterface',
++            'InterfaceEnabled': enabled, 'ExternallyAccessible': False,
++            'KernelAuthEnabled': False,
++            'Status': {'State': 'Enabled' if enabled else 'Disabled', 'Health': 'OK'},
++        })
++
++    @app.route('/redfish/v1/Managers/<identity>/NetworkProtocol',
++               methods=['GET', 'PATCH'])
++    @api_utils.ensure_instance_access
++    @api_utils.returns_json
++    def nico_network_protocol(identity):
++        if flask.request.method == 'PATCH':
++            body = flask.request.get_json(silent=True) or {}
++            if 'IPMI' in body and 'ProtocolEnabled' in body['IPMI']:
++                _ipmi_enabled[identity] = bool(body['IPMI']['ProtocolEnabled'])
++                app.logger.info('NetworkProtocol for "%s" IPMI=%s', identity,
++                                body['IPMI']['ProtocolEnabled'])
++            return '', 204
++        return flask.jsonify({
++            '@odata.id': '/redfish/v1/Managers/%s/NetworkProtocol' % identity,
++            '@odata.type':
++                '#ManagerNetworkProtocol.v1_5_0.ManagerNetworkProtocol',
++            'Id': 'NetworkProtocol', 'Name': 'Manager Network Protocol',
++            'HostName': app.systems.name(identity),
++            'HTTPS': {'ProtocolEnabled': True, 'Port': 443},
++            'IPMI': {'ProtocolEnabled': _ipmi_enabled.get(identity, False), 'Port': 623},
++            'SSH': {'ProtocolEnabled': False},
++            'Status': {'State': 'Enabled', 'Health': 'OK'},
++        })
++
++    @app.route('/redfish/v1/Managers/<identity>/Actions/Manager.Reset',
++               methods=['POST'])
++    @api_utils.ensure_instance_access
++    @api_utils.returns_json
++    def nico_manager_reset(identity):
++        # NiCo resets the BMC before ingesting a host. There is no BMC here.
++        app.logger.info('Manager.Reset for "%s": no-op', identity)
++        return '', 204
++
++    app.add_url_rule('/redfish/v1/Systems/<identity>/Bios/Actions/Bios.ResetBios',
++                     endpoint='nico_bios_reset',
++                     view_func=app.view_functions['system_reset_bios'],
++                     methods=['POST'])
++
++    @app.route('/redfish/v1/UpdateService/FirmwareInventory')
++    @api_utils.returns_json
++    def nico_firmware_inventory():
++        return flask.jsonify(_collection(
++            '/redfish/v1/UpdateService/FirmwareInventory',
++            '#SoftwareInventoryCollection.SoftwareInventoryCollection',
++            'Firmware Inventory Collection', []))
+diff --git a/sushy_tools/emulator/resources/systems/base.py b/sushy_tools/emulator/resources/systems/base.py
+index 5675d9c..ceb18f6 100644
+--- a/sushy_tools/emulator/resources/systems/base.py
++++ b/sushy_tools/emulator/resources/systems/base.py
+@@ -266,6 +266,13 @@ class AbstractSystemsDriver(metaclass=abc.ABCMeta):
+         """
+         raise error.NotSupportedError('Not implemented')
+ 
++    def get_serial_number(self, identity):
++        """Get system serial number (NiCo matches it to the ExpectedMachine)
++
++        :returns: serial as `str` or `None` when the backend has none
++        """
++        return None
++
+     def get_http_boot_uri(self, identity):
+         """Return the URI stored for the HttpBootUri.
+ 
+diff --git a/sushy_tools/emulator/resources/systems/fakedriver.py b/sushy_tools/emulator/resources/systems/fakedriver.py
+index df89009..0967f57 100644
+--- a/sushy_tools/emulator/resources/systems/fakedriver.py
++++ b/sushy_tools/emulator/resources/systems/fakedriver.py
+@@ -173,6 +173,25 @@ class FakeDriver(AbstractSystemsDriver):
+         devinfo[device] = (boot_image, write_protected, bool(boot_image))
+         self._update(system, boot_image=devinfo)
+ 
++    def get_serial_number(self, identity):
++        return self._get(identity).get('serial')
++
++    def get_bios(self, identity):
++        system = self._get(identity)
++        if 'bios' not in system:
++            self._update(system, bios=dict(self._config.get(
++                'SUSHY_EMULATOR_FAKE_BIOS', {'BootMode': 'Uefi'})))
++        return dict(self._get(identity)['bios'])
++
++    def set_bios(self, identity, attributes):
++        bios = self.get_bios(identity)
++        bios.update({k: str(v) for k, v in attributes.items()})
++        self._update(identity, bios=bios)
++
++    def reset_bios(self, identity):
++        self._update(identity, bios=dict(self._config.get(
++            'SUSHY_EMULATOR_FAKE_BIOS', {'BootMode': 'Uefi'})))
++
+     def get_nics(self, identity):
+         nics = self._get(identity)['nics']
+         return [{'id': nic.get('mac'), 'mac': nic.get('mac')}
+diff --git a/sushy_tools/emulator/resources/systems/libvirtdriver.py b/sushy_tools/emulator/resources/systems/libvirtdriver.py
+index 28cf401..c242e71 100644
+--- a/sushy_tools/emulator/resources/systems/libvirtdriver.py
++++ b/sushy_tools/emulator/resources/systems/libvirtdriver.py
+@@ -402,6 +402,13 @@ class LibvirtDriver(AbstractSystemsDriver):
+ 
+         return boot_source_target
+ 
++    def get_serial_number(self, identity):
++        """Serial from <sysinfo type='smbios'><system><entry name='serial'>"""
++        domain = self._get_domain(identity, readonly=True)
++        tree = ET.fromstring(domain.XMLDesc(libvirt.VIR_DOMAIN_XML_INACTIVE))
++        entry = tree.find(".//sysinfo[@type='smbios']/system/entry[@name='serial']")
++        return entry.text.strip() if entry is not None and entry.text else None
++
+     def _defineDomain(self, tree):
+         try:
+             with libvirt_open(self._uri) as conn:
+diff --git a/sushy_tools/emulator/templates/chassis.json b/sushy_tools/emulator/templates/chassis.json
+index 95c4449..009dc6d 100644
+--- a/sushy_tools/emulator/templates/chassis.json
++++ b/sushy_tools/emulator/templates/chassis.json
+@@ -5,10 +5,10 @@
+     "UUID": {{ uuid|string|tojson }},
+     "AssetTag": "Chicago-45Z-2381",
+     "ChassisType": "Enclosure",
+-    "Manufacturer": "Contoso",
+-    "Model": "3500RX",
+-    "SKU": "8675309",
+-    "SerialNumber": "437XR1138R2",
++    "Manufacturer": {{ nico_vendor|string|tojson }},
++    "Model": {{ nico_model|string|tojson }},
++    "SKU": {{ nico_model|string|tojson }},
++    "SerialNumber": {{ (nico_serial or "437XR1138R2")|string|tojson }},
+     "PartNumber": "224071-J23",
+     "PowerState": "On",
+     {%- if indicator_led %}
+diff --git a/sushy_tools/emulator/templates/ethernet_interface.json b/sushy_tools/emulator/templates/ethernet_interface.json
+index 0946cc2..a49dda7 100644
+--- a/sushy_tools/emulator/templates/ethernet_interface.json
++++ b/sushy_tools/emulator/templates/ethernet_interface.json
+@@ -8,6 +8,8 @@
+     },
+     "PermanentMACAddress": {{ nic['mac']|string|tojson }},
+     "MACAddress": {{ nic['mac']|string|tojson }},
++    "InterfaceEnabled": true,
++    "UefiDevicePath": {{ ("PciRoot(0x0)/Pci(0x1,0x0)/MAC(%s,0x1)"|format(nic['mac']|replace(':','')|upper))|tojson }},
+     "@odata.context": "/redfish/v1/$metadata#EthernetInterface.EthernetInterface",
+     "@odata.id": {{ "/redfish/v1/Systems/%s/EthernetInterfaces/%s"|format(identity, nic['id'])|tojson }}
+ }
+diff --git a/sushy_tools/emulator/templates/root.json b/sushy_tools/emulator/templates/root.json
+index fe36a0b..9356961 100644
+--- a/sushy_tools/emulator/templates/root.json
++++ b/sushy_tools/emulator/templates/root.json
+@@ -4,6 +4,13 @@
+     "Name": "Redvirt Service",
+     "RedfishVersion": "1.5.0",
+     "UUID": "85775665-c110-4b85-8989-e6162170b3ec",
++    "Vendor": {{ config['SUSHY_EMULATOR_NICO_VENDOR']|string|tojson }},
++    "Product": {{ config['SUSHY_EMULATOR_NICO_PRODUCT']|string|tojson }},
++    "Links": {
++        "Sessions": {
++            "@odata.id": "/redfish/v1/SessionService/Sessions"
++        }
++    },
+     {% if feature_set == "full" %}
+     "Chassis": {
+         "@odata.id": "/redfish/v1/Chassis"
+diff --git a/sushy_tools/emulator/templates/system.json b/sushy_tools/emulator/templates/system.json
+index e49f469..0e07d87 100644
+--- a/sushy_tools/emulator/templates/system.json
++++ b/sushy_tools/emulator/templates/system.json
+@@ -4,7 +4,12 @@
+     "Name": {{ name|string|tojson }},
+     "UUID": {{ uuid|string|tojson }},
+     {%- if feature_set == "full" %}
+-    "Manufacturer": "Sushy Emulator",
++    "Manufacturer": {{ nico_vendor|string|tojson }},
++    "Model": {{ nico_model|string|tojson }},
++    "SKU": {{ nico_model|string|tojson }},
++    {%- if nico_serial %}
++    "SerialNumber": {{ nico_serial|string|tojson }},
++    {%- endif %}
+     "Status": {
+         "State": "Enabled",
+         "Health": "OK",
+@@ -15,6 +20,10 @@
+     "PowerState": {{ power_state|string|tojson }},
+     {%- endif %}
+     "Boot": {
++        "BootOrder": {{ nico_boot_order|tojson }},
++        "BootOptions": {
++            "@odata.id": {{ "/redfish/v1/Systems/%s/BootOptions"|format(identity)|tojson }}
++        },
+         {%- if boot_source_target %}
+         "BootSourceOverrideEnabled": "Continuous",
+         "BootSourceOverrideTarget": {{ boot_source_target|string|tojson }},

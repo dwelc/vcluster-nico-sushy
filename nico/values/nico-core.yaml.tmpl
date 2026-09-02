@@ -1,0 +1,353 @@
+$(if [[ -n "${REGISTRY_PULL_SECRET}" ]]; then
+cat <<'PULL'
+global:
+  imagePullSecrets:
+    - name: imagepullsecret
+PULL
+fi)
+
+nico-api:
+  hostname: "${API_HOSTNAME}"
+
+  auth:
+    additionalIssuerCns:
+      - "site-root"
+
+  componentManager:
+    enabled: false
+  rms:
+    enabled: false
+
+  externalService:
+    enabled: true
+    annotations:
+      ${LB_IPS_ANNOTATION}: "${VIP_API}"
+
+  certificate:
+    extraDnsNames:
+      - "${API_HOSTNAME}"
+      # DPU agents hardcode these .forge names.
+      - "carbide-api.forge"
+      - "nico-api.forge"
+      - "carbide-api.forge-system.svc.cluster.local"
+
+  bootArtifactContainers: ${BOOT_ARTIFACT_CONTAINERS_YAML}
+
+  siteConfig:
+    enabled: true
+    nicoApiSiteConfig: |
+      sitename = "${SITE_NAME}"
+      initial_domain_name = "${SITE_DOMAIN}"
+      attestation_enabled = false
+      max_concurrent_machine_updates = 20
+
+      # Our VMs emulate no TPM; requiring it would stall ingestion.
+      tpm_required = false
+
+      dhcp_servers = ["${VIP_DHCP}"]
+
+      # No FRR at this site.
+      route_servers = []
+      enable_route_servers = false
+
+      site_fabric_prefixes = ["${HOSTINBAND_PREFIX}", "${SITE_IP_BLOCK_CIDR}"]
+      # Keep tenants off the BMC / Service network.
+      deny_prefixes = ["${OOB_PREFIX}"]
+
+      # Standalone rack-manager mode. NOT a DPU-policy switch.
+      rack_management_enabled = false
+
+      # Top-level, NOT under [site_explorer].
+      allow_insecure_discovery = ${ALLOW_INSECURE_DISCOVERY}
+
+      allow_bmc_basic_auth_fallback = ${ALLOW_BMC_BASIC_AUTH_FALLBACK}
+
+      # "ignore", not "nic": these VMs have NO DPU hardware at all.
+      [site_explorer]
+      dpu_policy = "ignore"
+      run_interval = "30s"
+      admin_segment_type_non_dpu = ${ADMIN_SEGMENT_TYPE_NON_DPU}
+
+      [machine_validation_config]
+      enabled = false
+
+      [bom_validation]
+      enabled = false
+      ignore_unassigned_machines = true
+
+      [pools.lo-ip]
+      type = "ipv4"
+      ranges = [{ start = "${POOL_LO_IP_START}", end = "${POOL_LO_IP_END}" }]
+
+      [pools.vlan-id]
+      type = "integer"
+      ranges = [{ start = "${POOL_VLAN_START}", end = "${POOL_VLAN_END}" }]
+
+      [pools.vni]
+      type = "integer"
+      ranges = [{ start = "${POOL_VNI_START}", end = "${POOL_VNI_END}" }]
+
+      [pools.vpc-vni]
+      type = "integer"
+      ranges = [{ start = "${POOL_VPC_VNI_START}", end = "${POOL_VPC_VNI_END}" }]
+
+      [pools.fnn-asn]
+      type = "integer"
+      ranges = [{ start = "${POOL_FNN_ASN_START}", end = "${POOL_FNN_ASN_END}" }]
+
+      [pools.external-vpc-vni]
+      type = "integer"
+      ranges = [{ start = "${POOL_EXT_VPC_VNI_START}", end = "${POOL_EXT_VPC_VNI_END}" }]
+
+      [networks.${OOB_NAME}]
+      type = "underlay"
+      prefix = "${OOB_PREFIX}"
+      gateway = "${OOB_GW}"
+      mtu = ${OOB_MTU}
+      reserve_first = ${OOB_RESERVE_FIRST}
+
+      [networks.admin]
+      type = "admin"
+      prefix = "${ADMIN_PREFIX}"
+      gateway = "${ADMIN_GW}"
+      mtu = ${ADMIN_MTU}
+      reserve_first = ${ADMIN_RESERVE_FIRST}
+
+      [networks.${HOSTINBAND_NAME}]
+      type = "hostinband"
+      prefix = "${HOSTINBAND_PREFIX}"
+      gateway = "${HOSTINBAND_GATEWAY}"
+      mtu = ${HOSTINBAND_MTU}
+      reserve_first = ${HOSTINBAND_RESERVE_FIRST}
+      allocation_strategy = "${HOSTINBAND_ALLOCATION_STRATEGY}"
+
+      [ib_config]
+      enabled = false
+
+      # Never auto-update emulated hardware.
+      [firmware_global]
+      autoupdate = false
+      no_reset_retries = true
+
+      datacenter_asn = ${DATACENTER_ASN}
+
+      [machine_state_controller]
+      failure_retry_time = "5m"
+
+      [fnn.admin_vpc]
+      enabled = true
+      vpc_vni = ${ADMIN_VPC_VNI}
+
+      [fnn.admin_vpc.routing_profile]
+      internal = true
+      route_target_imports = [
+        { asn = ${DATACENTER_ASN}, vni = 10 },
+      ]
+      route_targets_on_exports = [
+        { asn = ${DATACENTER_ASN}, vni = 50400 },
+      ]
+
+      [fnn.routing_profiles.INTERNAL]
+      internal = true
+      tenant_leak_communities_accepted = true
+      route_target_imports = [
+        { asn = ${DATACENTER_ASN}, vni = 11 },
+      ]
+      route_targets_on_exports = [
+        { asn = ${DATACENTER_ASN}, vni = 50200 },
+      ]
+
+      [fnn.routing_profiles.MAINTENANCE]
+      internal = true
+      route_target_imports = [
+        { asn = ${DATACENTER_ASN}, vni = 10 },
+        { asn = ${DATACENTER_ASN}, vni = 101 },
+        { asn = ${DATACENTER_ASN}, vni = 50100 },
+        { asn = ${DATACENTER_ASN}, vni = 121 },
+      ]
+      route_targets_on_exports = [
+        { asn = ${DATACENTER_ASN}, vni = 50300 },
+      ]
+
+      # NICo auto-inserts the default route for external profiles.
+      [fnn.routing_profiles.EXTERNAL]
+      internal = false
+      route_target_imports = [
+        { asn = ${DATACENTER_ASN}, vni = 50100 },
+      ]
+      route_targets_on_exports = [
+        { asn = ${DATACENTER_ASN}, vni = 50500 },
+      ]
+
+      [fnn.routing_profiles.PRIVILEGED_INTERNAL]
+      internal = true
+      route_target_imports = [
+        { asn = ${DATACENTER_ASN}, vni = 11 },
+        { asn = ${DATACENTER_ASN}, vni = 101 },
+        { asn = ${DATACENTER_ASN}, vni = 50100 },
+        { asn = ${DATACENTER_ASN}, vni = 900 },
+      ]
+      route_targets_on_exports = [
+        { asn = ${DATACENTER_ASN}, vni = 50100 },
+        { asn = ${DATACENTER_ASN}, vni = 50200 },
+      ]
+
+      [pools.vpc-dpu-lo]
+      type = "ipv4"
+      ranges = [
+        { start = "10.255.247.3", end = "10.255.247.255" },
+      ]
+
+      # No [dpf] block: this site has no DPUs and DPF is not installed.
+
+nico-dhcp:
+  enabled: true
+  externalService:
+    enabled: true
+    annotations:
+      ${LB_IPS_ANNOTATION}: "${VIP_DHCP}"
+  config:
+    keaConfigJsonRaw: |
+      {
+        "Dhcp4": {
+          "interfaces-config": {
+            "interfaces": ["eth0"],
+            "dhcp-socket-type": "udp"
+          },
+          "lease-database": {
+            "type": "memfile",
+            "lfc-interval": 3600
+          },
+          "match-client-id": false,
+          "authoritative": false,
+          "renew-timer": 900,
+          "rebind-timer": 1800,
+          "valid-lifetime": 3600,
+          "decline-probation-period": 900,
+          "hooks-libraries": [
+            {
+              "library": "/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so",
+              "parameters": {
+                "nico-api-url": "https://__API_HOST__.__NAMESPACE__.svc.cluster.local:1079",
+                "carbide-api-url": "https://__API_HOST__.__NAMESPACE__.svc.cluster.local:1079",
+                "nico-metrics-endpoint": "[::]:1089",
+                "carbide-metrics-endpoint": "[::]:1089",
+                "nico-nameservers": "${VIP_UNBOUND},${VIP_DNS_0}",
+                "carbide-nameservers": "${VIP_UNBOUND},${VIP_DNS_0}",
+                "nico-ntpserver": "${VIP_NTP_0},${VIP_NTP_1},${VIP_NTP_2}",
+                "carbide-ntpserver": "${VIP_NTP_0},${VIP_NTP_1},${VIP_NTP_2}",
+                "nico-provisioning-server-ipv4": "${VIP_PXE}",
+                "carbide-provisioning-server-ipv4": "${VIP_PXE}"
+              }
+            }
+          ],
+          "client-classes": [
+            {
+              "name": "nico-machines",
+              "test": "${NICO_MAC_CLASS_TEST}"
+            }
+          ],
+          "subnet4": [
+            {
+              "subnet": "0.0.0.0/0",
+              "pools": [
+                {
+                  "pool": "0.0.0.0-255.255.255.255",
+                  "client-class": "nico-machines"
+                }
+              ]
+            }
+          ],
+          "loggers": [
+            { "name": "kea-dhcp4", "severity": "INFO", "output_options": [{"output":"stdout"}] },
+            { "name": "kea-dhcp4.hooks", "severity": "INFO", "output_options": [{"output":"stdout"}] },
+            { "name": "kea-dhcp4.nico-rust", "severity": "INFO", "output_options": [{"output":"stdout"}] }
+          ]
+        }
+      }
+
+nico-dns:
+  externalService:
+    enabled: true
+    perPodAnnotations:
+      - ${LB_IPS_ANNOTATION}: "${VIP_DNS_0}"
+        ${LB_SHARING_ANNOTATION}: "nico-dns-instance-0"
+      - ${LB_IPS_ANNOTATION}: "${VIP_DNS_1}"
+        ${LB_SHARING_ANNOTATION}: "nico-dns-instance-1"
+
+# Serves HTTP network boot on :8080 (iPXE + UKI + rootfs). No TFTP involved.
+nico-pxe:
+  enabled: true
+  bootArtifactContainers: ${BOOT_ARTIFACT_CONTAINERS_YAML}
+  externalService:
+    enabled: true
+    annotations:
+      ${LB_IPS_ANNOTATION}: "${VIP_PXE}"
+      ${LB_SHARING_ANNOTATION}: "nico-pxe"
+
+nico-ntp:
+  image:
+    repository: "${NTP_IMAGE_REPOSITORY}"
+    tag: "${NTP_IMAGE_TAG}"
+  externalService:
+    enabled: true
+    perPodAnnotations:
+      - ${LB_IPS_ANNOTATION}: "${VIP_NTP_0}"
+      - ${LB_IPS_ANNOTATION}: "${VIP_NTP_1}"
+      - ${LB_IPS_ANNOTATION}: "${VIP_NTP_2}"
+
+nico-ssh-console-rs:
+  externalService:
+    enabled: true
+    annotations:
+      ${LB_IPS_ANNOTATION}: "${VIP_SSH_CONSOLE}"
+
+unbound:
+  enabled: true
+  image:
+    repository: "${UNBOUND_IMAGE_REPOSITORY}"
+    tag: "${UNBOUND_IMAGE_TAG}"
+  ## Wants remote-control keys a stock image never makes.
+  exporter:
+    enabled: false
+  command: ["/bin/sh", "-c"]
+  args:
+    - |
+      printf 'server:\n  interface: 0.0.0.0\n  interface: ::0\n  access-control: 0.0.0.0/0 allow\ninclude: "/etc/unbound/local.conf.d/*.conf"\n' > /unbound.conf
+      exec unbound -d -c /unbound.conf
+  localConfig:
+    forwarders.conf: |
+      forward-zone:
+          name: "${SITE_DOMAIN}."
+          forward-addr: ${VIP_DNS_0}
+          forward-addr: ${VIP_DNS_1}
+      forward-zone:
+          name: "${BRIDGE_REVERSE_ZONE}."
+          forward-addr: ${VIP_DNS_0}
+          forward-addr: ${VIP_DNS_1}
+      forward-zone:
+          name: "."
+          forward-addr: 8.8.8.8
+          forward-addr: 1.1.1.1
+  ## The legacy names, resolved to the services that actually serve them.
+  localData:
+    - name: carbide-static-pxe.forge
+      addresses: ["${VIP_PXE}"]
+    - name: carbide-pxe.forge
+      addresses: ["${VIP_PXE}"]
+    - name: carbide-api.forge
+      addresses: ["${VIP_API}"]
+    - name: nico-api.forge
+      addresses: ["${VIP_API}"]
+  ## Machines reach it as their DHCP-advertised resolver, so it needs a VIP.
+  externalService:
+    enabled: true
+    annotations:
+      ${LB_IPS_ANNOTATION}: "${VIP_UNBOUND}"
+      ${LB_SHARING_ANNOTATION}: "unbound-external"
+
+# DPU-only / not needed on a zero-DPU FLAT site.
+nico-dsx-exchange-consumer:
+  enabled: false
+nico-machine-a-tron:
+  enabled: false

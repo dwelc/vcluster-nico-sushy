@@ -1,0 +1,13 @@
+# Under privateNodes.autoNodes of a vCluster (0.36+) to have NiCo nodes join it.
+    - provider: nico
+      properties:
+        vcluster.com/os-image: ubuntu-noble-nico
+        vcluster.com/network-environment: nico-flat
+      static:
+        - name: node-pool-nico
+          quantity: 1
+          nodeTypeSelector:
+            - property: node.kubernetes.io/instance-type
+              operator: In
+              values:
+                - nico.flat-demo-type

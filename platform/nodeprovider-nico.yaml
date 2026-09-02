@@ -1,0 +1,22 @@
+# NiCo NodeProvider (vCluster Platform 4.13+). NodeTypes are DISCOVERED from NiCo instance types
+# (<provider>.<instance-type-name>), not declared here. org, siteId and networkMode are immutable:
+# recreate the provider to change them. siteId and siteIPBlockID are printed at the end of
+# nico/scripts/nico-day0.sh.
+apiVersion: management.loft.sh/v1
+kind: NodeProvider
+metadata:
+  name: nico
+spec:
+  displayName: "NiCo (NVIDIA Infra Controller)"
+  properties:
+    vcluster.com/os-image: ubuntu-noble-nico
+  nico:
+    endpoint: http://nico-rest-api.nico-rest.svc.cluster.local:8388   # scheme+host+port only
+    org: ncx                                                          # NICO_ORG (provider org)
+    siteId: CHANGE-ME-site-uuid
+    siteIPBlockID: CHANGE-ME-ipblock-uuid
+    networkMode: flat          # zero-DPU hosts; fnn is refused by NiCo for them
+    identity:
+      platformIssued:
+        enabled: true
+    insecureSkipTLSVerify: true

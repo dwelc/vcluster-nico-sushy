@@ -1,0 +1,28 @@
+nico-rest-api:
+  replicaCount: 1
+$(if [[ -n "${PLATFORM_ISSUER_URL}" && -n "${PLATFORM_JWKS_URL}" ]]; then
+cat <<ISSUER
+  config:
+    keycloak:
+      enabled: false
+    issuers:
+      - name: "${PLATFORM_ISSUER_NAME}"
+        origin: custom
+        jwks: "${PLATFORM_JWKS_URL}"
+        issuer: "${PLATFORM_ISSUER_URL}"
+        audiences:
+          - "${PLATFORM_AUDIENCE}"
+        claimMappings:
+          - orgAttribute: organization
+            orgDisplayAttribute: organization
+            rolesAttribute: roles
+ISSUER
+fi)
+nico-rest-cert-manager:
+  replicaCount: 1
+nico-rest-site-manager:
+  replicaCount: 1
+nico-rest-cloud-worker:
+  replicaCount: 1
+nico-rest-site-worker:
+  replicaCount: 1

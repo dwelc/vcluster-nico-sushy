@@ -1,0 +1,64 @@
+repositories:
+  - name: hashicorp
+    url: https://helm.releases.hashicorp.com
+  - name: external-secrets
+    url: https://charts.external-secrets.io
+  - name: postgres-operator
+    url: https://opensource.zalando.com/postgres-operator/charts/postgres-operator
+
+releases:
+  # Zalando publishes no chart below 1.11.0.
+  - name: postgres-operator
+    namespace: postgres
+    createNamespace: true
+    chart: postgres-operator/postgres-operator
+    version: "1.11.0"
+    wait: true
+    timeout: 600
+    values:
+      - {{ requiredEnv "PREREQS" }}/operators/values/postgres-operator.yaml
+
+  - name: vault
+    namespace: vault
+    createNamespace: true
+    chart: hashicorp/vault
+    version: "0.25.0"
+    wait: true
+    timeout: 600
+    values:
+      - {{ requiredEnv "PREREQS" }}/operators/values/vault.yaml
+      # Last wins: relaxed anti-affinity and reduced resources.
+      - {{ requiredEnv "VAULT_OVERLAY" }}
+
+  - name: external-secrets
+    namespace: external-secrets
+    createNamespace: true
+    chart: external-secrets/external-secrets
+    version: "0.14.3"
+    wait: true
+    timeout: 600
+    values:
+      - {{ requiredEnv "PREREQS" }}/operators/values/external-secrets.yaml
+
+  - name: nico-prereqs
+    namespace: nico-system
+    createNamespace: true
+    chart: {{ requiredEnv "PREREQS" }}
+    wait: true
+    timeout: 600
+    values:
+      - {{ requiredEnv "PREREQS" }}/values.yaml
+      - {{ requiredEnv "PREREQS_OVERLAY" }}
+      # Last: reads the live vault root token at render time.
+      - {{ requiredEnv "PREREQS" }}/values/nico-prereqs-dynamic.yaml.gotmpl
+    hooks:
+      - events: ["postSync"]
+        command: "bash"
+        args:
+          - -c
+          - |
+            set -euo pipefail
+            kubectl label namespace nico-system nico.nvidia.com/managed=true --overwrite
+            kubectl annotate externalsecret nico-roots-eso -n nico-system \
+                force-sync="$(date +%s)" --overwrite 2>/dev/null || true
+            until kubectl get secret nico-roots -n nico-system &>/dev/null; do sleep 3; done

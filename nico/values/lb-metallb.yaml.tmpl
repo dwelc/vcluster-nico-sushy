@@ -1,0 +1,32 @@
+# LB_MODE=metallb: pools for the NiCo VIPs plus an L2Advertisement (the upstream helm-prereqs
+# layout). Requires MetalLB already installed in ${METALLB_NAMESPACE}.
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: nico-internal
+  namespace: ${METALLB_NAMESPACE}
+spec:
+  autoAssign: false
+  addresses:
+    - ${METALLB_INTERNAL_RANGE}
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: nico-external
+  namespace: ${METALLB_NAMESPACE}
+spec:
+  autoAssign: false
+  addresses:
+    - ${METALLB_EXTERNAL_RANGE}
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: nico-l2
+  namespace: ${METALLB_NAMESPACE}
+spec:
+  ipAddressPools:
+    - nico-internal
+    - nico-external

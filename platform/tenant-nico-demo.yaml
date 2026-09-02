@@ -1,0 +1,20 @@
+# A Tenant that opts into NiCo. The annotation is what makes the Platform create a NiCo tenant org
+# (must differ from the provider org). Its NodeType quota becomes a NiCo compute allocation; keep it
+# <= the number of machines not reserved by anything else (see docs/troubleshooting.md).
+apiVersion: management.loft.sh/v1
+kind: Tenant
+metadata:
+  name: nico-demo
+  annotations:
+    nico.vcluster.com/org: vcluster-demo
+    nico.vcluster.com/node-provider: nico
+spec:
+  displayName: NiCo Demo Tenant
+  nodeTypes:
+    enabled: true
+    allow:
+      byName:
+        - nico.flat-demo-type      # <provider>.<instance-type>, exists only after discovery
+    quota:
+      byType:
+        nico.flat-demo-type: "1"
